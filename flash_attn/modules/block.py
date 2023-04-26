@@ -84,6 +84,7 @@ class Block(nn.Module):
             assert (isinstance(self.norm1, (nn.LayerNorm, RMSNorm))
                     and isinstance(self.dropout1, nn.Dropout))
 
+
         # TD [2023-01-07]: TODO: During training, if sequence_parallel is False and dropout != 0.0,
         # then the input to each worker in the tensor parallel group will be different.
         # This would produce wrong outputs? Somehow we'd need to sync the RNG state across workers.
@@ -119,8 +120,9 @@ class Block(nn.Module):
                 before applying the query projection. Useful for e.g., ViT where we only care
                 about the CLS token in the last layer.
         """
-        fused_add_norm_fn = (dropout_add_rms_norm if isinstance(self.norm1, RMSNorm)
-                             else dropout_add_layer_norm)
+        if self.fused_dropout_add_ln:
+            fused_add_norm_fn = (dropout_add_rms_norm if isinstance(self.norm1, RMSNorm)
+                                 else dropout_add_layer_norm)
         if self.prenorm:
             if not self.fused_dropout_add_ln:
                 dropped = self.drop_path1(self.dropout1(hidden_states))
@@ -285,9 +287,10 @@ class ParallelBlock(nn.Module):
             hidden_states2: the output of the previous MLP layer (if None, will use hidden_states1).
             residual.
         """
-        fused_add_norm_fn = (dropout_add_rms_norm_parallel_residual
-                             if isinstance(self.norm1, RMSNorm)
-                             else dropout_add_layer_norm_parallel_residual)
+        if self.fused_dropout_add_ln:
+            fused_add_norm_fn = (dropout_add_rms_norm_parallel_residual
+                                 if isinstance(self.norm1, RMSNorm)
+                                 else dropout_add_layer_norm_parallel_residual)
         if not self.fused_dropout_add_ln:
             dropped1 = self.dropout1(hidden_states1)
             # For the very 1st block, we only want 1 dropout, not two different dropouts

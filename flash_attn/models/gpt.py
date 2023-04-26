@@ -61,6 +61,25 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+class MyRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6,  device=None, dtype=None):
+        """
+        LlamaRMSNorm is equivalent to T5LayerNorm
+        """
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size, **factory_kwargs))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+
+        # convert into half-precision if necessary
+        if self.weight.dtype in [torch.float16, torch.bfloat16]:
+            hidden_states = hidden_states.to(self.weight.dtype)
+
+        return self.weight * hidden_states
 
 def create_mixer_cls(config, layer_idx=None, process_group=None, device=None, dtype=None):
     factory_kwargs = {'device': device, 'dtype': dtype}
@@ -166,7 +185,7 @@ def create_block(config, layer_idx=None, process_group=None, device=None, dtype=
     mixer_cls = create_mixer_cls(config, layer_idx, process_group=process_group, **factory_kwargs)
     mlp_cls = create_mlp_cls(config, layer_idx, process_group=process_group, **factory_kwargs)
     use_rms_norm = getattr(config, 'rms_norm', False)
-    norm_cls = partial(nn.LayerNorm if not use_rms_norm else RMSNorm,
+    norm_cls = partial(MyRMSNorm if not use_rms_norm else RMSNorm,
                        eps=config.layer_norm_epsilon, **factory_kwargs)
     # TD [2022-07-30]: Force residual in fp32, seems to make fp16 training more stable
     residual_in_fp32 = getattr(config, 'residual_in_fp32', False)
@@ -316,7 +335,7 @@ class GPTModel(GPTPreTrainedModel):
                 raise ImportError('dropout_layer_norm is not installed')
         if self.prenorm:
             self.drop_f = nn.Dropout(config.resid_pdrop)
-            norm_cls = nn.LayerNorm if not use_rms_norm else RMSNorm
+            norm_cls = MyRMSNorm if not use_rms_norm else RMSNorm
             self.ln_f = norm_cls(config.hidden_size, eps=config.layer_norm_epsilon,
                                  **factory_kwargs)
         if process_group is not None:

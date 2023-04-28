@@ -253,7 +253,7 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
             if self.gradient_checkpointing and self.training:
 
                 if self.prenorm:
-                    hidden_states, residual = torch.utils.checkpoint.checkpoint(layer, hidden_states, residual, {})
+                    hidden_states, residual = torch.utils.checkpoint.checkpoint(layer, hidden_states, residual)
                 else:
 
                     def create_custom_forward(module):

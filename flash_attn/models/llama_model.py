@@ -250,14 +250,12 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
 
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        mixer_kwargs = ({'seqlen': input_ids.shape[1]}
-                        if self.process_group is not None and self.sequence_parallel else {})
         for layer in self.layers:
             if self.prenorm:
                 hidden_states, residual = layer(hidden_states, residual,
-                                                mixer_kwargs=mixer_kwargs)
+                                                mixer_kwargs={})
             else:
-                hidden_states = layer(hidden_states, mixer_kwargs=mixer_kwargs)
+                hidden_states = layer(hidden_states, mixer_kwargs={})
 
         if self.prenorm:
             if not self.fused_dropout_add_ln:

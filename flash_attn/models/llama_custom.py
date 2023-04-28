@@ -37,19 +37,6 @@ class FlashLlamaConfig(LlamaConfig):
         )
 
 def remap_state_dict_meta_llama(state_dict, config):
-    # def key_mapping_layers(key):
-    #     key = re.sub(r'^model.', r'transformer.', key)
-    #     return key
-    #
-    # state_dict = OrderedDict((key_mapping_layers(k), v) for k, v in state_dict.items())
-
-    # def key_mapping_emb(key):
-    #     return re.sub(r'^transformer.embed_tokens.', 'transformer.embeddings.word_embeddings.', key)
-    #
-    # state_dict = OrderedDict((key_mapping_emb(k), v) for k, v in state_dict.items())
-    # word_embeddings = state_dict.pop('transformer.embeddings.word_embeddings.weight')
-    # state_dict['transformer.embeddings.word_embeddings.weight'] = word_embeddings
-
     if getattr(config, 'tie_word_embeddings'):
         state_dict['lm_head.weight'] = state_dict['transformer.embeddings.word_embeddings.weight']
 
@@ -148,6 +135,5 @@ def llama_config_to_gpt2_config(llama_config: LlamaConfig) -> FlashLlamaConfig:
         initializer_range=llama_config.initializer_range,
         bos_token_id=llama_config.bos_token_id,
         eos_token_id=llama_config.eos_token_id,
-        # These are new arguments not in the original GPT2Config
-        pad_token_id=llama_config.pad_token_id,  # Idk if this does anything
+        pad_token_id=llama_config.pad_token_id,
     )

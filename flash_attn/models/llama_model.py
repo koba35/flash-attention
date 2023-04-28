@@ -189,7 +189,7 @@ def create_block(config, layer_idx=None):
 
 class FlashLlamaPreTrainedModel(PreTrainedModel):
     config_class = FlashLlamaConfig
-    base_model_prefix = "transformer"
+    base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["Block"]
 
@@ -250,11 +250,40 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for layer in self.layers:
-            if self.prenorm:
-                hidden_states, residual = layer(hidden_states, residual,
-                                                mixer_kwargs={})
+            if self.gradient_checkpointing and self.training:
+
+                if self.prenorm:
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            # None for past_key_value
+                            return module(*inputs)
+
+                        return custom_forward
+
+                    hidden_states, residual = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(layer),
+                        residual,
+                        {}
+                    )
+                else:
+
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            # None for past_key_value
+                            return module(*inputs)
+
+                        return custom_forward
+
+                    hidden_states = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(layer),
+                        {}
+                    )
             else:
-                hidden_states = layer(hidden_states, mixer_kwargs={})
+                if self.prenorm:
+                    hidden_states, residual = layer(hidden_states, residual,
+                                                    mixer_kwargs={})
+                else:
+                    hidden_states = layer(hidden_states, mixer_kwargs={})
 
         if self.prenorm:
             if not self.fused_dropout_add_ln:

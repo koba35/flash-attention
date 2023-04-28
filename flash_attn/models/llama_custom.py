@@ -11,6 +11,28 @@ import torch.nn.functional as F
 
 from transformers import GPT2Config, LlamaConfig, LlamaForCausalLM
 
+class FlashLlamaConfig(LlamaConfig):
+    def __init__(self,
+                 use_flash_attn=True, fused_bias_fc=True,fused_mlp=False,fused_dropout_add_ln=False,
+                 rms_norm=False, residual_in_fp32=True,
+
+                 **kwargs):
+        self.use_flash_attn = use_flash_attn
+        self.fused_bias_fc = fused_bias_fc
+        self.fused_mlp = fused_mlp  # We don't have fused GatedMLP yet
+        self.fused_dropout_add_ln = fused_dropout_add_ln
+        self.rms_norm = rms_norm
+        self.residual_in_fp32 = residual_in_fp32
+        self.rotary_emb_fraction = 1.0,
+        self.rotary_emb_interleaved = True,
+        self.tie_word_embeddings = False,
+        self.qkv_proj_bias = False,
+        self.out_proj_bias = False,
+        self.mlp_fc1_bias = False,
+        self.mlp_fc2_bias = False,
+        super().__init__(
+            **kwargs,
+        )
 
 def remap_state_dict_meta_llama(state_dict, config):
     def key_mapping_layers(key):
@@ -109,16 +131,14 @@ def load_state_dict_from_hf(destination):
 
     return state_dict
 
-def llama_config_to_gpt2_config(llama_config: LlamaConfig) -> GPT2Config:
-    return GPT2Config(
+def llama_config_to_gpt2_config(llama_config: LlamaConfig) -> LlamaConfig:
+    return FlashLlamaConfig(
         vocab_size=llama_config.vocab_size,
-        n_positions=0,  # No absolute position embedding
         n_embd=llama_config.hidden_size,
         n_layer=llama_config.num_hidden_layers,
         n_head=llama_config.num_attention_heads,
         n_inner=llama_config.intermediate_size,
         activation_function='swiglu',  # Hardcode since HF calls it 'silu'
-        # Llama doesn't have dropout, idk if it's because they only release the inference code
         resid_pdrop=0.0,
         embd_pdrop=0.0,
         attn_pdrop=0.0,
@@ -128,12 +148,4 @@ def llama_config_to_gpt2_config(llama_config: LlamaConfig) -> GPT2Config:
         eos_token_id=llama_config.eos_token_id,
         # These are new arguments not in the original GPT2Config
         pad_token_id=llama_config.pad_token_id,  # Idk if this does anything
-        rms_norm=True,
-        rotary_emb_fraction=1.0,
-        rotary_emb_interleaved=True,
-        tie_word_embeddings=False,
-        qkv_proj_bias=False,
-        out_proj_bias=False,
-        mlp_fc1_bias=False,
-        mlp_fc2_bias=False,
     )

@@ -1,7 +1,6 @@
 # Copyright (c) 2023, Tri Dao.
 
 import logging
-import math
 from collections import namedtuple
 from collections.abc import Sequence
 from functools import partial
@@ -9,16 +8,14 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
-from transformers import GPT2Config
 from transformers import PreTrainedModel
 
-from flash_attn.modules.block import Block, ParallelBlock
-from flash_attn.modules.embedding import GPT2Embeddings, ParallelGPT2Embeddings
+from flash_attn.models.llama_custom import FlashLlamaConfig
+from flash_attn.modules.block import Block
 from flash_attn.modules.mha import MHA, ParallelMHA
 from flash_attn.modules.mlp import Mlp, GatedMlp, FusedMLP, ParallelFusedMLP
 from flash_attn.ops.activations import sqrelu_fwd
-from flash_attn.utils.distributed import all_gather_raw
+from transformers.modeling_outputs import CausalLMOutput
 
 try:
     from flash_attn.ops.fused_dense import ColumnParallelLinear
@@ -172,45 +169,27 @@ def create_mlp_cls(config, layer_idx=None, process_group=None, device=None, dtyp
     return mlp_cls
 
 
-def create_block(config, layer_idx=None, process_group=None, device=None, dtype=None):
-    factory_kwargs = {'device': device, 'dtype': dtype}
-    sequence_parallel = getattr(config, 'sequence_parallel', True)
-    mixer_cls = create_mixer_cls(config, layer_idx, process_group=process_group, **factory_kwargs)
-    mlp_cls = create_mlp_cls(config, layer_idx, process_group=process_group, **factory_kwargs)
-    use_rms_norm = getattr(config, 'rms_norm', False)
-    norm_cls = partial(MyRMSNorm if not use_rms_norm else RMSNorm,
-                       eps=config.layer_norm_epsilon, **factory_kwargs)
+def create_block(config, layer_idx=None):
+    mixer_cls = create_mixer_cls(config, layer_idx)
+    mlp_cls = create_mlp_cls(config, layer_idx)
+    norm_cls = partial(MyRMSNorm, eps=config.layer_norm_epsilon)
     # TD [2022-07-30]: Force residual in fp32, seems to make fp16 training more stable
     residual_in_fp32 = getattr(config, 'residual_in_fp32', False)
     resid_dropout1 = config.resid_pdrop if layer_idx is None or layer_idx > 0 else config.embd_pdrop
     prenorm = getattr(config, 'prenorm', True)
-    parallel_block = getattr(config, 'parallel_block', False)
-    if not parallel_block:
-        block = Block(
-            config.hidden_size, mixer_cls, mlp_cls, norm_cls=norm_cls,
-            prenorm=prenorm, resid_dropout1=resid_dropout1, resid_dropout2=config.resid_pdrop,
-            fused_dropout_add_ln=getattr(config, 'fused_dropout_add_ln', False),
-            residual_in_fp32=residual_in_fp32,
-            sequence_parallel=sequence_parallel and process_group is not None,
-            mark_shared_params=process_group is not None
-        )
-    else:
-        assert prenorm
-        block = ParallelBlock(
-            config.hidden_size, mixer_cls, mlp_cls, norm_cls=norm_cls,
-            resid_dropout1=resid_dropout1, resid_dropout2=config.resid_pdrop,
-            tied_norm=getattr(config, 'parallel_block_tied_norm', False),
-            fused_dropout_add_ln=getattr(config, 'fused_dropout_add_ln', False),
-            residual_in_fp32=residual_in_fp32,
-            sequence_parallel=sequence_parallel and process_group is not None,
-            mark_shared_params=process_group is not None
-        )
+
+    block = Block(
+        config.hidden_size, mixer_cls, mlp_cls, norm_cls=norm_cls,
+        prenorm=prenorm, resid_dropout1=resid_dropout1, resid_dropout2=config.resid_pdrop,
+        fused_dropout_add_ln=getattr(config, 'fused_dropout_add_ln', False),
+        residual_in_fp32=residual_in_fp32
+    )
     block.layer_idx = layer_idx
     return block
 
 
 class FlashLlamaPreTrainedModel(PreTrainedModel):
-    config_class = GPT2Config
+    config_class = FlashLlamaConfig
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True
     _no_split_modules = ["Block"]
@@ -233,37 +212,19 @@ class FlashLlamaPreTrainedModel(PreTrainedModel):
 
 class FlashLlamaModel(FlashLlamaPreTrainedModel):
 
-    def __init__(self, config: GPT2Config, process_group=None, device=None, dtype=None):
+    def __init__(self, config: FlashLlamaConfig):
         super().__init__(config)
-        factory_kwargs = {'device': device, 'dtype': dtype}
-        self.process_group = process_group
-        self.sequence_parallel = getattr(config, 'sequence_parallel', True)
         assert config.activation_function in ['gelu', 'gelu_new', 'gelu_fast', 'gelu_approx',
                                               'relu', 'sqrelu', 'glu', 'swiglu', 'geglu']
 
         # TD [2022-07-30]: Force residual in fp32, seems to make fp16 training more stable
         self.residual_in_fp32 = getattr(config, 'residual_in_fp32', False)
+        self.padding_idx = config.padding_idx
         # These 2 options are for OPT-350m
         self.prenorm = getattr(config, 'prenorm', True)
-        use_rms_norm = getattr(config, 'rms_norm', False)
-        word_embed_proj_dim = getattr(config, 'word_embed_proj_dim', None)
-        # For GPT-J, GPT-NeoX
-        self.parallel_block = getattr(config, 'parallel_block', False)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
 
-        if process_group is None:
-            self.embeddings = GPT2Embeddings(
-                config.hidden_size, config.vocab_size, config.max_position_embeddings,
-                word_embed_proj_dim=word_embed_proj_dim, **factory_kwargs
-            )
-        else:
-            self.embeddings = ParallelGPT2Embeddings(
-                config.hidden_size, config.vocab_size, config.max_position_embeddings,
-                process_group=process_group, sequence_parallel=self.sequence_parallel,
-                **factory_kwargs
-            )
-
-        self.layers = nn.ModuleList([create_block(config, layer_idx=i, process_group=process_group,
-                                                  **factory_kwargs)
+        self.layers = nn.ModuleList([create_block(config, layer_idx=i)
                                      for i in range(config.num_hidden_layers)])
 
         self.fused_dropout_add_ln = getattr(config, 'fused_dropout_add_ln', False)
@@ -273,127 +234,79 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
                 raise ImportError('dropout_layer_norm is not installed')
         if self.prenorm:
             self.drop_f = nn.Dropout(config.resid_pdrop)
-            norm_cls = MyRMSNorm if not use_rms_norm else RMSNorm
-            self.ln_f = norm_cls(config.hidden_size, eps=config.layer_norm_epsilon,
-                                 **factory_kwargs)
-        if process_group is not None:
-            for p in self.ln_f.parameters():
-                # Mark the norm parameters as "shared_params" so that we sync their values at init.
-                p._shared_params = True
-                # Mark the norm params as "sequence_parallel" so we run all-reduce on their grads.
-                if self.sequence_parallel:
-                    p._sequence_parallel = True
+            self.ln_f = MyRMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
 
     def get_input_embeddings(self):
-        return self.embeddings.word_embeddings
+        return self.embed_tokens
 
     def set_input_embeddings(self, value):
-        self.embeddings.word_embeddings = value
+        self.embed_tokens = value
 
-    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        return {i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
-                for i, layer in enumerate(self.layers)}
+    def forward(self, input_ids, **kwargs):
 
-    def forward(self, input_ids, position_ids=None, inference_params=None):
-        # If using Tensor Parallel with sequence parallel, we combine the batch and the seqlen
-        # dimensions so that we can split on it easily, in case of small batch size.
-        # Only the attention layers need to know the seqlen.
-        embedding_kwargs = ({'combine_batch_seqlen_dim': True}
-                            if self.process_group is not None and self.sequence_parallel else {})
-        hidden_states = self.embeddings(input_ids, position_ids=position_ids, **embedding_kwargs)
-        if self.parallel_block:
-            hidden_states2 = None
+        hidden_states = self.embed_tokens(input_ids)
         residual = None
         mixer_kwargs = ({'seqlen': input_ids.shape[1]}
                         if self.process_group is not None and self.sequence_parallel else {})
-        if inference_params is not None:
-            mixer_kwargs['inference_params'] = inference_params
         for layer in self.layers:
             if self.prenorm:
-                if not self.parallel_block:
-                    hidden_states, residual = layer(hidden_states, residual,
-                                                    mixer_kwargs=mixer_kwargs)
-                else:
-                    hidden_states, hidden_states2, residual = layer(
-                        hidden_states, hidden_states2, residual, mixer_kwargs=mixer_kwargs
-                    )
+                hidden_states, residual = layer(hidden_states, residual,
+                                                mixer_kwargs=mixer_kwargs)
             else:
                 hidden_states = layer(hidden_states, mixer_kwargs=mixer_kwargs)
+
         if self.prenorm:
             if not self.fused_dropout_add_ln:
                 dropped = self.drop_f(hidden_states)
-                if not self.parallel_block:
-                    residual = (dropped + residual) if residual is not None else dropped
-                else:
-                    dropped2 = self.drop_f(hidden_states2)
-                    residual = ((residual + dropped + dropped2)
-                                if residual is not None else dropped + dropped2)
+                residual = (dropped + residual) if residual is not None else dropped
                 hidden_states = self.ln_f(residual.to(dtype=self.ln_f.weight.dtype))
             else:
-                # Set prenorm=False here since we don't need the residual
-                if not self.parallel_block:
-                    hidden_states = dropout_add_layer_norm(
-                        hidden_states, residual, self.ln_f.weight, self.ln_f.bias,
-                        self.drop_f.p if self.training else 0.0, self.ln_f.eps, prenorm=False,
-                        residual_in_fp32=self.residual_in_fp32
-                    )
-                else:
-                    hidden_states, _ = dropout_add_layer_norm_parallel_residual(
-                        hidden_states, hidden_states2, residual, self.ln_f.weight, self.ln_f.bias,
-                        None, None, self.drop_f.p if self.training else 0.0, self.ln_f.eps,
-                        prenorm=False, residual_in_fp32=self.residual_in_fp32
-                    )
+                hidden_states = dropout_add_layer_norm(
+                    hidden_states, residual, self.ln_f.weight, self.ln_f.bias,
+                    self.drop_f.p if self.training else 0.0, self.ln_f.eps, prenorm=False,
+                    residual_in_fp32=self.residual_in_fp32
+                )
+
         return hidden_states
 
 
 class FlashLlamaForCausalLM(FlashLlamaPreTrainedModel):
-    def __init__(self, config, process_group=None, device=None, dtype=None):
-        factory_kwargs = {'device': device, 'dtype': dtype}
-        super().__init__(config, process_group=None, device=None, dtype=None)
-        self.process_group = process_group
-        self.transformer = FlashLlamaModel(config, process_group=process_group, **factory_kwargs)
+    def __init__(self, config: FlashLlamaConfig):
+        super().__init__(config)
+
+        self.model = FlashLlamaModel(config)
 
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        self.tie_word_embeddings = getattr(config, 'tie_word_embeddings', True)
-        lm_head_bias = getattr(config, 'lm_head_bias', False)
-        pad_vocab_size_multiple = getattr(config, 'pad_vocab_size_multiple', 1)
-        vocab_size = (math.ceil(config.vocab_size / pad_vocab_size_multiple)
-                      * pad_vocab_size_multiple)
-        # This option is for OPT-350m
-        word_embed_proj_dim = getattr(config, 'word_embed_proj_dim', None)
-        embed_dim = config.n_embd if word_embed_proj_dim is None else word_embed_proj_dim
-        if word_embed_proj_dim is not None:
-            self.project_out = nn.Linear(config.n_embd, embed_dim, bias=False, **factory_kwargs)
-        else:
-            self.project_out = None
-        if process_group is None:
-            self.lm_head = nn.Linear(embed_dim, vocab_size, bias=lm_head_bias, **factory_kwargs)
-        else:
-            if ColumnParallelLinear is None:
-                raise ImportError('fused_dense_lib is not installed')
-            self.lm_head = ColumnParallelLinear(
-                embed_dim, vocab_size, process_group, bias=lm_head_bias,
-                sequence_parallel=getattr(config, 'sequence_parallel', True), **factory_kwargs
-            )
-        # Initialize weights and apply final processing
         self.post_init()
 
-    def forward(self, input_ids, position_ids=None, inference_params=None, last_token_only=False):
-        hidden_states = self.transformer(input_ids, position_ids=position_ids,
-                                         inference_params=inference_params)
-        if last_token_only:
-            hidden_states = hidden_states[:, -1]
-        if self.project_out is not None:
-            hidden_states = self.project_out(hidden_states)
-        lm_logits = self.lm_head(hidden_states)
-        # During inference, we want the full logit for sampling
-        if isinstance(self.lm_head, ColumnParallelLinear) and inference_params is not None:
-            lm_logits, _ = all_gather_raw(lm_logits, self.lm_head.process_group)
-            lm_logits = rearrange(lm_logits, '(n b) ... d -> b ... (n d)', b=hidden_states.shape[0])
-        CausalLMOutput = namedtuple('CausalLMOutput', ['logits'])
-        return CausalLMOutput(logits=lm_logits)
+    def forward(self, input_ids, labels=None, **kwargs):
+        hidden_states = self.model(input_ids)
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = nn.CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        return CausalLMOutput(
+            loss=loss,
+            logits=logits,
+        )
+
+    def prepare_inputs_for_generation(
+            self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+    ):
+        return {"input_ids": input_ids}

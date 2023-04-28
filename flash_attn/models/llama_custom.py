@@ -23,7 +23,9 @@ class FlashLlamaConfig(LlamaConfig):
         self.fused_dropout_add_ln = fused_dropout_add_ln
         self.rms_norm = rms_norm
         self.residual_in_fp32 = residual_in_fp32
-        self.rotary_emb_fraction = 1.0,
+        self.rotary_emb_fraction = 1.0
+        self.scale_attn_weights = True
+        self.scale_attn_by_inverse_layer_idx = False
         self.rotary_emb_interleaved = True,
         self.tie_word_embeddings = False,
         self.qkv_proj_bias = False,
@@ -35,18 +37,18 @@ class FlashLlamaConfig(LlamaConfig):
         )
 
 def remap_state_dict_meta_llama(state_dict, config):
-    def key_mapping_layers(key):
-        key = re.sub(r'^model.', r'transformer.', key)
-        return key
+    # def key_mapping_layers(key):
+    #     key = re.sub(r'^model.', r'transformer.', key)
+    #     return key
+    #
+    # state_dict = OrderedDict((key_mapping_layers(k), v) for k, v in state_dict.items())
 
-    state_dict = OrderedDict((key_mapping_layers(k), v) for k, v in state_dict.items())
-
-    def key_mapping_emb(key):
-        return re.sub(r'^transformer.embed_tokens.', 'transformer.embeddings.word_embeddings.', key)
-
-    state_dict = OrderedDict((key_mapping_emb(k), v) for k, v in state_dict.items())
-    word_embeddings = state_dict.pop('transformer.embeddings.word_embeddings.weight')
-    state_dict['transformer.embeddings.word_embeddings.weight'] = word_embeddings
+    # def key_mapping_emb(key):
+    #     return re.sub(r'^transformer.embed_tokens.', 'transformer.embeddings.word_embeddings.', key)
+    #
+    # state_dict = OrderedDict((key_mapping_emb(k), v) for k, v in state_dict.items())
+    # word_embeddings = state_dict.pop('transformer.embeddings.word_embeddings.weight')
+    # state_dict['transformer.embeddings.word_embeddings.weight'] = word_embeddings
 
     if getattr(config, 'tie_word_embeddings'):
         state_dict['lm_head.weight'] = state_dict['transformer.embeddings.word_embeddings.weight']

@@ -1,7 +1,6 @@
 # Copyright (c) 2023, Tri Dao.
 
 import logging
-from collections import namedtuple
 from collections.abc import Sequence
 from functools import partial
 
@@ -9,13 +8,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutput
 
 from flash_attn.models.llama_custom import FlashLlamaConfig
 from flash_attn.modules.block import Block
 from flash_attn.modules.mha import MHA, ParallelMHA
 from flash_attn.modules.mlp import Mlp, GatedMlp, FusedMLP, ParallelFusedMLP
 from flash_attn.ops.activations import sqrelu_fwd
-from transformers.modeling_outputs import CausalLMOutput
 
 try:
     from flash_attn.ops.fused_dense import ColumnParallelLinear
@@ -303,6 +302,24 @@ class FlashLlamaForCausalLM(FlashLlamaPreTrainedModel):
             loss=loss,
             logits=logits,
         )
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
 
     def prepare_inputs_for_generation(
             self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs

@@ -219,7 +219,7 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
 
         # TD [2022-07-30]: Force residual in fp32, seems to make fp16 training more stable
         self.residual_in_fp32 = getattr(config, 'residual_in_fp32', False)
-        self.padding_idx = config.padding_idx
+        self.padding_idx = config.pad_token_id
         # These 2 options are for OPT-350m
         self.prenorm = getattr(config, 'prenorm', True)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)

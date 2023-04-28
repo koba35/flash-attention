@@ -131,7 +131,7 @@ def load_state_dict_from_hf(destination):
 
     return state_dict
 
-def llama_config_to_gpt2_config(llama_config: LlamaConfig) -> LlamaConfig:
+def llama_config_to_gpt2_config(llama_config: LlamaConfig) -> FlashLlamaConfig:
     return FlashLlamaConfig(
         vocab_size=llama_config.vocab_size,
         n_embd=llama_config.hidden_size,

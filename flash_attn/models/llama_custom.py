@@ -26,12 +26,12 @@ class FlashLlamaConfig(LlamaConfig):
         self.rotary_emb_fraction = 1.0
         self.scale_attn_weights = True
         self.scale_attn_by_inverse_layer_idx = False
-        self.rotary_emb_interleaved = True,
-        self.tie_word_embeddings = False,
-        self.qkv_proj_bias = False,
-        self.out_proj_bias = False,
-        self.mlp_fc1_bias = False,
-        self.mlp_fc2_bias = False,
+        self.rotary_emb_interleaved = True
+        self.tie_word_embeddings = False
+        self.qkv_proj_bias = False
+        self.out_proj_bias = False
+        self.mlp_fc1_bias = False
+        self.mlp_fc2_bias = False
         super().__init__(
             **kwargs,
         )

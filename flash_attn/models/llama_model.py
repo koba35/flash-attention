@@ -253,16 +253,7 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
             if self.gradient_checkpointing and self.training:
 
                 if self.prenorm:
-                    def create_custom_forward(module):
-                        def custom_forward(*inputs):
-                            # None for past_key_value
-                            return module(*inputs)
-
-                        return custom_forward
-
-                    hidden_states, residual = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(layer, residual, {})
-                    )
+                    hidden_states, residual = torch.utils.checkpoint.checkpoint(layer, residual, {})
                 else:
 
                     def create_custom_forward(module):
@@ -273,7 +264,8 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
                         return custom_forward
 
                     hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(layer, {})
+                        create_custom_forward(layer),
+                        {}
                     )
             else:
                 if self.prenorm:
@@ -292,7 +284,7 @@ class FlashLlamaModel(FlashLlamaPreTrainedModel):
                     hidden_states, residual, self.ln_f.weight, self.ln_f.bias,
                     self.drop_f.p if self.training else 0.0, self.ln_f.eps, prenorm=False,
                     residual_in_fp32=self.residual_in_fp32
-                )
+                            )
 
         return hidden_states
 
